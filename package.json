@@ -9,7 +9,8 @@
   "main": "src/index.ts",
   "scripts": {
     "backfill": "bun run src/backfill.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "bun test"
   },
   "devDependencies": {
     "@opencode-ai/plugin": "^1.18.18",

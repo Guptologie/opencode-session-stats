@@ -1,0 +1,256 @@
+/**
+ * Per-session metric aggregation.
+ *
+ * Everything here is derived from data opencode already persists — no extra
+ * instrumentation is involved. The shapes below are declared structurally
+ * rather than imported from `@opencode-ai/sdk` on purpose: the generated v1
+ * `Session` type is currently missing `cost`/`tokens` even though the server
+ * returns them, and a plugin should keep working across SDK regenerations.
+ */
+
+export interface Tokens {
+  input: number
+  output: number
+  reasoning: number
+  cache: { read: number; write: number }
+}
+
+export interface SessionInfo {
+  id: string
+  parentID?: string
+  projectID?: string
+  directory?: string
+  title?: string
+  time: { created: number; updated: number }
+  /** Projector-maintained totals. Absent on older SDK shapes; used only to cross-check. */
+  cost?: number
+  tokens?: Tokens
+}
+
+interface UserMessageInfo {
+  role: "user"
+  time: { created: number }
+}
+
+interface AssistantMessageInfo {
+  role: "assistant"
+  time: { created: number; completed?: number }
+  providerID?: string
+  modelID?: string
+  summary?: boolean
+}
+
+type MessageInfo = UserMessageInfo | AssistantMessageInfo
+
+interface TextPart {
+  type: "text"
+  synthetic?: boolean
+}
+
+interface ToolPart {
+  type: "tool"
+  tool?: string
+  state?:
+    | { status: "pending" }
+    | { status: "running"; time?: { start: number } }
+    | { status: "completed" | "error"; time?: { start: number; end: number } }
+}
+
+interface StepFinishPart {
+  type: "step-finish"
+  cost?: number
+  tokens?: Tokens
+}
+
+type Part = TextPart | ToolPart | StepFinishPart | { type: string }
+
+export interface MessageWithParts {
+  info: MessageInfo
+  parts: Part[]
+}
+
+export interface ModelUsage {
+  steps: number
+  tokens: Tokens
+  cost: number
+}
+
+export interface Metrics {
+  runtime: {
+    /** Session span. For a rolled-up total this stays the parent's own span — see `merge`. */
+    wallClockMs: number
+    /** Time the agent was actually generating, summed over LLM steps. */
+    activeMs: number
+    /** Time spent inside tool execution. A subset of activeMs. */
+    toolMs: number
+  }
+  /** Genuine human turns. See `isHumanTurn`. */
+  humanIterations: number
+  /** LLM steps, excluding summarisation calls. */
+  llmSteps: number
+  summarySteps: number
+  toolCalls: {
+    total: number
+    completed: number
+    error: number
+    pending: number
+    byTool: Record<string, number>
+  }
+  tokens: Tokens & { total: number }
+  cost: number
+  byModel: Record<string, ModelUsage>
+}
+
+export function emptyTokens(): Tokens {
+  return { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } }
+}
+
+export function emptyMetrics(): Metrics {
+  return {
+    runtime: { wallClockMs: 0, activeMs: 0, toolMs: 0 },
+    humanIterations: 0,
+    llmSteps: 0,
+    summarySteps: 0,
+    toolCalls: { total: 0, completed: 0, error: 0, pending: 0, byTool: {} },
+    tokens: { ...emptyTokens(), total: 0 },
+    cost: 0,
+    byModel: {},
+  }
+}
+
+function addTokens(into: Tokens, from: Tokens | undefined) {
+  if (!from) return
+  into.input += from.input ?? 0
+  into.output += from.output ?? 0
+  into.reasoning += from.reasoning ?? 0
+  into.cache.read += from.cache?.read ?? 0
+  into.cache.write += from.cache?.write ?? 0
+}
+
+function totalOf(tokens: Tokens): number {
+  return tokens.input + tokens.output + tokens.reasoning + tokens.cache.read + tokens.cache.write
+}
+
+/**
+ * A `role: "user"` row is not automatically a human turn. opencode also writes
+ * user-role messages for compaction summaries and for the "the following tool
+ * was executed by the user" notice, and the latter's text part is flagged
+ * `synthetic`. A real prompt from the keyboard always carries at least one text
+ * part the runtime did not synthesise.
+ */
+function isHumanTurn(message: MessageWithParts): boolean {
+  return message.parts.some((part) => part.type === "text" && (part as TextPart).synthetic !== true)
+}
+
+export function computeMetrics(session: SessionInfo, messages: MessageWithParts[]): Metrics {
+  const metrics = emptyMetrics()
+  metrics.runtime.wallClockMs = Math.max(0, session.time.updated - session.time.created)
+
+  for (const message of messages) {
+    const info = message.info
+
+    if (info.role === "user") {
+      if (isHumanTurn(message)) metrics.humanIterations++
+    } else {
+      // One assistant message is one LLM step: the agentic loop calls the model
+      // once per iteration rather than relying on an SDK-side step limit.
+      // Counting messages (not step-finish parts) also captures steps that
+      // errored or were interrupted before reporting usage.
+      if (info.summary === true) metrics.summarySteps++
+      else metrics.llmSteps++
+
+      if (info.time.completed !== undefined) {
+        metrics.runtime.activeMs += Math.max(0, info.time.completed - info.time.created)
+      }
+    }
+
+    const model =
+      info.role === "assistant" && info.providerID && info.modelID ? `${info.providerID}/${info.modelID}` : undefined
+
+    for (const part of message.parts) {
+      if (part.type === "step-finish") {
+        // Usage is summed from step-finish parts rather than read off the
+        // assistant message, because the message's `tokens` field is
+        // overwritten per step while only `cost` accumulates. This mirrors how
+        // opencode's own projector maintains the session totals.
+        const step = part as StepFinishPart
+        addTokens(metrics.tokens, step.tokens)
+        metrics.cost += step.cost ?? 0
+
+        if (model) {
+          const usage = (metrics.byModel[model] ??= { steps: 0, tokens: emptyTokens(), cost: 0 })
+          usage.steps++
+          addTokens(usage.tokens, step.tokens)
+          usage.cost += step.cost ?? 0
+        }
+        continue
+      }
+
+      if (part.type !== "tool") continue
+
+      const tool = part as ToolPart
+      metrics.toolCalls.total++
+      metrics.toolCalls.byTool[tool.tool ?? "unknown"] = (metrics.toolCalls.byTool[tool.tool ?? "unknown"] ?? 0) + 1
+
+      const state = tool.state
+      if (state?.status === "completed" || state?.status === "error") {
+        if (state.status === "completed") metrics.toolCalls.completed++
+        else metrics.toolCalls.error++
+        if (state.time) metrics.runtime.toolMs += Math.max(0, state.time.end - state.time.start)
+      } else {
+        // Pending and running calls never settled — an interrupted or
+        // still-in-flight turn. No duration to attribute.
+        metrics.toolCalls.pending++
+      }
+    }
+  }
+
+  metrics.tokens.total = totalOf(metrics.tokens)
+  return metrics
+}
+
+/**
+ * Combine metrics from separate sessions.
+ *
+ * `wallClockMs` is deliberately taken as the maximum rather than the sum:
+ * subagent sessions run *inside* their parent's elapsed time, so adding their
+ * spans would double-count the clock. Active and tool time are genuine
+ * additional work and do sum.
+ */
+export function merge(a: Metrics, b: Metrics): Metrics {
+  const out = emptyMetrics()
+
+  out.runtime.wallClockMs = Math.max(a.runtime.wallClockMs, b.runtime.wallClockMs)
+  out.runtime.activeMs = a.runtime.activeMs + b.runtime.activeMs
+  out.runtime.toolMs = a.runtime.toolMs + b.runtime.toolMs
+
+  out.humanIterations = a.humanIterations + b.humanIterations
+  out.llmSteps = a.llmSteps + b.llmSteps
+  out.summarySteps = a.summarySteps + b.summarySteps
+
+  out.toolCalls.total = a.toolCalls.total + b.toolCalls.total
+  out.toolCalls.completed = a.toolCalls.completed + b.toolCalls.completed
+  out.toolCalls.error = a.toolCalls.error + b.toolCalls.error
+  out.toolCalls.pending = a.toolCalls.pending + b.toolCalls.pending
+  for (const source of [a.toolCalls.byTool, b.toolCalls.byTool]) {
+    for (const [tool, count] of Object.entries(source)) {
+      out.toolCalls.byTool[tool] = (out.toolCalls.byTool[tool] ?? 0) + count
+    }
+  }
+
+  addTokens(out.tokens, a.tokens)
+  addTokens(out.tokens, b.tokens)
+  out.tokens.total = totalOf(out.tokens)
+  out.cost = a.cost + b.cost
+
+  for (const source of [a.byModel, b.byModel]) {
+    for (const [model, usage] of Object.entries(source)) {
+      const target = (out.byModel[model] ??= { steps: 0, tokens: emptyTokens(), cost: 0 })
+      target.steps += usage.steps
+      addTokens(target.tokens, usage.tokens)
+      target.cost += usage.cost
+    }
+  }
+
+  return out
+}
