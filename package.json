@@ -1,0 +1,19 @@
+{
+  "name": "opencode-session-stats",
+  "version": "0.1.0",
+  "private": true,
+  "license": "MIT",
+  "description": "Writes per-session metrics from opencode to one JSON file per chat, for offline analysis.",
+  "repository": "github:Guptologie/opencode-session-stats",
+  "type": "module",
+  "main": "src/index.ts",
+  "scripts": {
+    "backfill": "bun run src/backfill.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@opencode-ai/plugin": "^1.18.18",
+    "@types/bun": "^1.3.0",
+    "typescript": "^5.9.0"
+  }
+}
