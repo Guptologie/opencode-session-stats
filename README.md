@@ -36,6 +36,8 @@ with `$OPENCODE_METRICS_DIR`, or via config:
 }
 ```
 
+Options: `dir`, `capturePrompt` (default `true`), `promptMaxChars` (default `1000`).
+
 ```jsonc
 {
   "schemaVersion": 1,
@@ -43,6 +45,7 @@ with `$OPENCODE_METRICS_DIR`, or via config:
   "parentID": null,
   "projectID": "…",
   "title": "…",
+  "firstPrompt": "what time is it?",
   "directory": "/path/to/project",
   "time": { "created": 0, "updated": 0 },
   "writtenAt": 0,
@@ -98,6 +101,17 @@ instrumentation, it only reads and aggregates.
   than summed. Subagents run *inside* their parent's elapsed time, so adding
   their spans would double-count the clock. `activeMs` and `toolMs` are genuine
   additional work and do sum.
+- **`firstPrompt`** — the opening human turn, verbatim, trimmed to
+  `promptMaxChars`. Recorded because `title` is model-generated and often reads
+  nothing like what was actually asked. Answering an agent's question does not
+  count: those replies come back as tool output, not user messages. Subagent
+  sessions have no `firstPrompt`, since a parent starts them rather than a human.
+
+### A note on content
+
+`firstPrompt` is the only field that stores conversation text; everything else is
+a number. If you sync or share this directory, set `capturePrompt: false` to keep
+it purely quantitative.
 
 ## Subagents
 

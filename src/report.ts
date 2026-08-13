@@ -9,9 +9,29 @@
 import { homedir } from "os"
 import { join } from "path"
 import { mkdir, rename, rm, writeFile } from "fs/promises"
-import { computeMetrics, emptyMetrics, merge, type MessageWithParts, type Metrics, type SessionInfo } from "./metrics.ts"
+import {
+  computeMetrics,
+  emptyMetrics,
+  firstPrompt,
+  merge,
+  type MessageWithParts,
+  type Metrics,
+  type SessionInfo,
+} from "./metrics.ts"
 
 export const SCHEMA_VERSION = 1
+
+/** Opening prompts are trimmed to this many characters before being stored. */
+export const PROMPT_MAX_CHARS = 1_000
+
+export interface BuildOptions {
+  /**
+   * Record the opening prompt. On by default. Turn it off to keep these files
+   * free of conversation text — every other field is a number.
+   */
+  capturePrompt?: boolean
+  promptMaxChars?: number
+}
 
 export interface Report {
   schemaVersion: number
@@ -19,6 +39,8 @@ export interface Report {
   parentID?: string
   projectID?: string
   title?: string
+  /** The opening prompt, verbatim. Absent when capture is disabled. */
+  firstPrompt?: string
   directory?: string
   time: { created: number; updated: number }
   writtenAt: number
@@ -98,11 +120,16 @@ async function collectDescendants(
   return { metrics, children: children.map((child) => child.id) }
 }
 
-export async function buildReport(client: SessionClient, sessionID: string): Promise<Report | undefined> {
+export async function buildReport(
+  client: SessionClient,
+  sessionID: string,
+  options: BuildOptions = {},
+): Promise<Report | undefined> {
   const session = await fetchSession(client, sessionID)
   if (!session) return undefined
 
-  const self = computeMetrics(session, await fetchMessages(client, sessionID))
+  const messages = await fetchMessages(client, sessionID)
+  const self = computeMetrics(session, messages)
   const descendants = await collectDescendants(client, sessionID, new Set([sessionID]))
 
   const total = merge(self, descendants.metrics)
@@ -116,6 +143,8 @@ export async function buildReport(client: SessionClient, sessionID: string): Pro
     parentID: session.parentID,
     projectID: session.projectID,
     title: session.title,
+    firstPrompt:
+      options.capturePrompt === false ? undefined : firstPrompt(messages, options.promptMaxChars ?? PROMPT_MAX_CHARS),
     directory: session.directory,
     time: session.time,
     writtenAt: Date.now(),
@@ -149,14 +178,19 @@ export async function removeReport(dir: string, sessionID: string): Promise<void
  * before its parent does, so without rewriting ancestors the parent's file
  * would never pick up the child's contribution.
  */
-export async function writeChain(client: SessionClient, dir: string, sessionID: string): Promise<string[]> {
+export async function writeChain(
+  client: SessionClient,
+  dir: string,
+  sessionID: string,
+  options: BuildOptions = {},
+): Promise<string[]> {
   const written: string[] = []
   const seen = new Set<string>()
   let current: string | undefined = sessionID
 
   while (current && !seen.has(current)) {
     seen.add(current)
-    const report = await buildReport(client, current)
+    const report = await buildReport(client, current, options)
     if (!report) break
     written.push(await writeReport(dir, report))
     current = report.parentID

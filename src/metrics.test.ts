@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test"
-import { computeMetrics, emptyMetrics, merge, type MessageWithParts, type SessionInfo } from "./metrics.ts"
+import { computeMetrics, emptyMetrics, firstPrompt, merge, type MessageWithParts, type SessionInfo } from "./metrics.ts"
 
 const session: SessionInfo = {
   id: "ses_a",
@@ -92,6 +92,45 @@ test("merge sums work but takes the max wall clock", () => {
   expect(total.cost).toBe(3)
   expect(total.tokens.total).toBe(334)
   expect(total.byModel["p/m"]?.steps).toBe(2)
+})
+
+test("firstPrompt takes the opening human turn, skipping synthetic rows", () => {
+  const messages: MessageWithParts[] = [
+    // A compaction summary precedes the real prompt in a resumed session.
+    { info: { role: "user", time: { created: 0 } }, parts: [{ type: "text", synthetic: true, text: "continue" }] },
+    { info: { role: "user", time: { created: 1 } }, parts: [{ type: "text", text: "what time is it?" }] },
+    { info: { role: "user", time: { created: 2 } }, parts: [{ type: "text", text: "and where are we?" }] },
+  ]
+  expect(firstPrompt(messages, 1_000)).toBe("what time is it?")
+})
+
+test("firstPrompt joins multiple text parts and trims", () => {
+  const messages: MessageWithParts[] = [
+    {
+      info: { role: "user", time: { created: 0 } },
+      parts: [
+        { type: "file" },
+        { type: "text", text: "  line one  " },
+        { type: "text", text: "line two\n" },
+      ],
+    },
+  ]
+  expect(firstPrompt(messages, 1_000)).toBe("line one  \nline two")
+})
+
+test("firstPrompt truncates long prompts with an ellipsis", () => {
+  const messages: MessageWithParts[] = [
+    { info: { role: "user", time: { created: 0 } }, parts: [{ type: "text", text: "x".repeat(50) }] },
+  ]
+  expect(firstPrompt(messages, 10)).toBe(`${"x".repeat(10)}…`)
+})
+
+test("firstPrompt is undefined when there is no human prompt", () => {
+  expect(firstPrompt([], 1_000)).toBeUndefined()
+  expect(
+    firstPrompt([{ info: { role: "user", time: { created: 0 } }, parts: [{ type: "text", text: "  " }] }], 1_000),
+  ).toBeUndefined()
+  expect(firstPrompt([{ info: { role: "assistant", time: { created: 0 } }, parts: [] }], 1_000)).toBeUndefined()
 })
 
 test("merging with an empty metrics value is an identity for counts", () => {

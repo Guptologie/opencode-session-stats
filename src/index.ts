@@ -16,6 +16,10 @@ import { removeReport, resolveDir, writeChain, type SessionClient } from "./repo
 export const SessionMetricsPlugin: Plugin = async ({ client }, options) => {
   const dir = resolveDir(options?.["dir"])
   const sessions = client as unknown as SessionClient
+  const build = {
+    capturePrompt: options?.["capturePrompt"] !== false,
+    promptMaxChars: typeof options?.["promptMaxChars"] === "number" ? options["promptMaxChars"] : undefined,
+  }
 
   return {
     event: async ({ event }) => {
@@ -25,7 +29,7 @@ export const SessionMetricsPlugin: Plugin = async ({ client }, options) => {
       try {
         if (event.type === "session.idle") {
           const sessionID = (event.properties as { sessionID?: string }).sessionID
-          if (sessionID) await writeChain(sessions, dir, sessionID)
+          if (sessionID) await writeChain(sessions, dir, sessionID, build)
           return
         }
 

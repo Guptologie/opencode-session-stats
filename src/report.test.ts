@@ -28,7 +28,7 @@ function fakeClient(): SessionClient {
   const sessions: Record<string, SessionInfo> = { ses_parent: parent, ses_child: child }
   const messages: Record<string, MessageWithParts[]> = {
     ses_parent: [
-      { info: { role: "user", time: { created: 0 } }, parts: [{ type: "text" }] },
+      { info: { role: "user", time: { created: 0 } }, parts: [{ type: "text", text: "what time is it?" }] },
       step(1),
     ],
     ses_child: [step(2), step(3)],
@@ -79,6 +79,15 @@ test("rolls descendants into the parent total without double-counting wall clock
 
   expect(report.children).toEqual(["ses_child"])
   expect(report.parentID).toBeUndefined()
+})
+
+test("records the opening prompt, and omits it when capture is off", async () => {
+  const client = fakeClient()
+  expect((await buildReport(client, "ses_parent"))?.firstPrompt).toBe("what time is it?")
+  expect((await buildReport(client, "ses_parent", { capturePrompt: false }))?.firstPrompt).toBeUndefined()
+  expect((await buildReport(client, "ses_parent", { promptMaxChars: 4 }))?.firstPrompt).toBe("what…")
+  // A subagent session is started by the parent, not typed by a human.
+  expect((await buildReport(client, "ses_child"))?.firstPrompt).toBeUndefined()
 })
 
 test("a child report counts only itself", async () => {
